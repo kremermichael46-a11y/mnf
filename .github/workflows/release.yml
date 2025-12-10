@@ -1,5 +1,3 @@
-uname: Release (Linux)
-
 on:
   push:
     tags:
