@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: Build & Test (Linux, ${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cppcheck ccache gzip zip
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ runner.os }}-${{ matrix.cc }}-ccache-${{ hashFiles('src/*.c', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.cc }}-ccache-
+
+      - name: Build
+        run: |
+          make clean
+          make CC="ccache ${{ matrix.cc }}"
+
+      - name: Smoke tests
+        run: |
+          set -euxo pipefail
+          ./mnf --version
+          ./mnf --help | head -n 25
+          workdir="$(mktemp -d)"
+          mkdir -p "$workdir/src/a/b" "$workdir/dst"
+          echo "hello" > "$workdir/src/a/b/file.txt"
+          ./mnf "$workdir/src" "$workdir/dst" --dry-run | tee "$workdir/out.txt"
+          grep -q "WOULD MOVE" "$workdir/out.txt"
+
+      - name: Static analysis (cppcheck)
+        continue-on-error: true
+        run: |
+          cppcheck --std=c11 --enable=warning,style,performance,portability \
+                   --inline-suppr --quiet src
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnf-linux-${{ matrix.cc }}
+          path: mnf

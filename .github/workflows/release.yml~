@@ -1,0 +1,41 @@
+name: Release (Linux)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gzip
+
+      - name: Build
+        run: |
+          make clean
+          make
+
+      - name: Package man page
+        run: |
+          gzip -c man/mnf.1 > mnf.1.gz
+
+      - name: Create tarball
+        run: |
+          tar czf mnf-linux-amd64.tar.gz mnf mnf.1.gz README.md LICENSE || true
+
+      - name: Upload Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mnf-linux-amd64.tar.gz
+            mnf
+            mnf.1.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
