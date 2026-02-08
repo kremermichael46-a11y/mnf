@@ -14,6 +14,13 @@ make
 # oder: gcc -O2 -pthread -Wall -Wextra -o mnf src/mnf.c
 ```
 
+## Release (Linux)
+
+```bash
+make release
+# erzeugt dist/mnf-1.0.0-linux-<arch>.tar.gz
+```
+
 ## Installation
 
 ```bash
