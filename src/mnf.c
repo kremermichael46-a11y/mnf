@@ -10,7 +10,6 @@
 //
 // See the man page (man/mnf.1) or run: mnf --help
 
-#define _GNU_SOURCE
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/sendfile.h>
@@ -51,23 +50,34 @@ static void die(const char *fmt, ...) {
     exit(EXIT_FAILURE);
 }
 
-static void vlogf(int level, const char *fmt, va_list ap) {
+static void vlog_msg(int level, const char *fmt, va_list ap) {
     if (level > g_verbose) return;
     pthread_mutex_lock(&log_mx);
     vfprintf(stdout, fmt, ap); fputc('\n', stdout);
     fflush(stdout);
     pthread_mutex_unlock(&log_mx);
 }
-static void logf(int level, const char *fmt, ...) {
+static void log_msg(int level, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
-    vlogf(level, fmt, ap);
+    vlog_msg(level, fmt, ap);
     va_end(ap);
 }
 
 // ------------------------------ Small utils ------------------------------
 static void path_join(char *dst, size_t dstsz, const char *a, const char *b) {
-    if (snprintf(dst, dstsz, "%s/%s", a, b) >= (int)dstsz)
-        die("Path too long: '%s' + '%s'", a, b);
+    size_t alen = strlen(a);
+    size_t blen = strlen(b);
+    size_t needed = alen + 1 + blen + 1;
+    if (needed > dstsz) die("Path too long: '%s' + '%s'", a, b);
+    memcpy(dst, a, alen);
+    dst[alen] = '/';
+    memcpy(dst + alen + 1, b, blen);
+    dst[alen + 1 + blen] = '\0';
+}
+static void str_copy_checked(char *dst, size_t dstsz, const char *src) {
+    size_t slen = strlen(src) + 1;
+    if (slen > dstsz) die("Path too long: '%s'", src);
+    memcpy(dst, src, slen);
 }
 static const char *basename_const(const char *path) {
     const char *s = strrchr(path, '/');
@@ -377,11 +387,24 @@ static void split_name(const char *name, char *base, size_t bsz, char *ext, size
 static void unique_path(char *out, size_t outsz, const char *dest_dir, const char *name) {
     char base[PATH_MAX], ext[PATH_MAX];
     split_name(name, base, sizeof(base), ext, sizeof(ext));
-    snprintf(out, outsz, "%s/%s", dest_dir, name);
+    path_join(out, outsz, dest_dir, name);
     int n=1;
     while (access(out, F_OK) == 0) {
-        if (snprintf(out, outsz, "%s/%s_%d%s", dest_dir, base, n, ext) >= (int)outsz)
-            die("Path too long (unique_path)");
+        char num[32];
+        int numlen = snprintf(num, sizeof(num), "%d", n);
+        if (numlen < 0 || (size_t)numlen >= sizeof(num)) die("Path suffix too long (unique_path)");
+        size_t destlen = strlen(dest_dir);
+        size_t baselen = strlen(base);
+        size_t extlen = strlen(ext);
+        size_t needed = destlen + 1 + baselen + 1 + (size_t)numlen + extlen + 1;
+        if (needed > outsz) die("Path too long (unique_path)");
+        memcpy(out, dest_dir, destlen);
+        out[destlen] = '/';
+        memcpy(out + destlen + 1, base, baselen);
+        out[destlen + 1 + baselen] = '_';
+        memcpy(out + destlen + 1 + baselen + 1, num, (size_t)numlen);
+        memcpy(out + destlen + 1 + baselen + 1 + (size_t)numlen, ext, extlen);
+        out[needed - 1] = '\0';
         n++;
     }
 }
@@ -479,7 +502,8 @@ static int copy_file_rw(const char *src, const char *dst, mode_t mode, bool pres
 }
 static int move_symlink(const char *src, const char *dst, bool overwrite) {
     char target[PATH_MAX]; ssize_t len = readlink(src, target, sizeof(target)-1);
-    if (len < 0) return -1; target[len] = '\0';
+    if (len < 0) return -1;
+    target[len] = '\0';
     if (overwrite) unlink(dst);
     if (symlink(target, dst) != 0) return -1;
     if (unlink(src) != 0) return -1;
@@ -537,17 +561,17 @@ static bool file_passes_filters(const options_t *o, const char *rel, const struc
 
 static void traverse_and_queue(const options_t *o, const char *dir, int depth, const char *relbase) {
     DIR *d = opendir(dir);
-    if (!d) { logf(1, "Warning: cannot open '%s' (%s)", dir, strerror(errno)); return; }
+    if (!d) { log_msg(1, "Warning: cannot open '%s' (%s)", dir, strerror(errno)); return; }
     struct dirent *ent;
 
     while ((ent = readdir(d)) != NULL) {
         if (strcmp(ent->d_name, ".")==0 || strcmp(ent->d_name, "..")==0) continue;
         char path[PATH_MAX]; path_join(path, sizeof(path), dir, ent->d_name);
         char rel[PATH_MAX];
-        if (relbase && *relbase) snprintf(rel, sizeof(rel), "%s/%s", relbase, ent->d_name);
-        else snprintf(rel, sizeof(rel), "%s", ent->d_name);
+        if (relbase && *relbase) path_join(rel, sizeof(rel), relbase, ent->d_name);
+        else str_copy_checked(rel, sizeof(rel), ent->d_name);
 
-        struct stat st; if (lstat(path, &st) < 0) { logf(1, "lstat failed for '%s' (%s)", path, strerror(errno)); continue; }
+        struct stat st; if (lstat(path, &st) < 0) { log_msg(1, "lstat failed for '%s' (%s)", path, strerror(errno)); continue; }
 
         if (S_ISLNK(st.st_mode)) {
             if (!o->include_symlinks) continue;
@@ -560,7 +584,7 @@ static void traverse_and_queue(const options_t *o, const char *dir, int depth, c
             continue;
         }
         if (S_ISDIR(st.st_mode)) {
-            char subcanon[PATH_MAX]; if (!realpath(path, subcanon)) { logf(1, "realpath failed for '%s' (%s)", path, strerror(errno)); continue; }
+            char subcanon[PATH_MAX]; if (!realpath(path, subcanon)) { log_msg(1, "realpath failed for '%s' (%s)", path, strerror(errno)); continue; }
             if (is_under(subcanon, DST_CANON)) continue;
             if (o->max_depth >= 0 && depth >= o->max_depth) continue;
             traverse_and_queue(o, path, depth + 1, rel);
@@ -586,11 +610,11 @@ static void *worker_main(void *arg) {
         bool skip=false, overwrite=false;
 
         if (o->mode == MODE_SKIP) {
-            snprintf(target, sizeof(target), "%s/%s", DST_CANON, name);
+            path_join(target, sizeof(target), DST_CANON, name);
             if (access(target, F_OK) == 0) { skip=true; }
         }
         if (o->mode == MODE_OVERWRITE) {
-            snprintf(target, sizeof(target), "%s/%s", DST_CANON, name);
+            path_join(target, sizeof(target), DST_CANON, name);
             overwrite = true;
         }
         if (o->mode == MODE_RENAME) {
@@ -600,13 +624,13 @@ static void *worker_main(void *arg) {
         }
 
         if (skip) {
-            logf(2, "Skip (exists): %s", name);
+            log_msg(2, "Skip (exists): %s", name);
             add_skipped();
             free(j.src_path); free(j.rel_path);
             continue;
         }
         if (o->dry_run) {
-            logf(1, "WOULD MOVE: '%s' -> '%s'", j.src_path, target);
+            log_msg(1, "WOULD MOVE: '%s' -> '%s'", j.src_path, target);
             add_skipped();
             free(j.src_path); free(j.rel_path);
             continue;
@@ -616,8 +640,8 @@ static void *worker_main(void *arg) {
         if (j.is_symlink) rc = move_symlink(j.src_path, target, overwrite);
         else rc = move_file_with_modes(j.src_path, target, overwrite, o->preserve_times, o->progress);
 
-        if (rc == 0) { logf(2, "Moved: '%s' -> '%s'", j.src_path, target); add_moved(); }
-        else { logf(1, "ERROR: cannot move '%s' (%s)", j.src_path, strerror(errno)); add_failed(); }
+        if (rc == 0) { log_msg(2, "Moved: '%s' -> '%s'", j.src_path, target); add_moved(); }
+        else { log_msg(1, "ERROR: cannot move '%s' (%s)", j.src_path, strerror(errno)); add_failed(); }
 
         free(j.src_path); free(j.rel_path);
     }
@@ -633,10 +657,10 @@ int main(int argc, char **argv) {
     if (!realpath(opt.dst, DST_CANON)) die("Cannot resolve destination path: %s", opt.dst);
     if (access(DST_CANON, W_OK) != 0 && !opt.dry_run) die("No write permission in destination: %s", DST_CANON);
 
-    logf(1, "Source: %s", SRC_CANON);
-    logf(1, "Dest  : %s", DST_CANON);
+    log_msg(1, "Source: %s", SRC_CANON);
+    log_msg(1, "Dest  : %s", DST_CANON);
     if (is_under(DST_CANON, SRC_CANON)) {
-        logf(1, "Note: destination lies within source; that subtree will be excluded.");
+        log_msg(1, "Note: destination lies within source; that subtree will be excluded.");
     }
 
     int nth = opt.threads > 0 ? opt.threads : 1;
@@ -658,7 +682,7 @@ int main(int argc, char **argv) {
     unsigned long long bytes = stats.bytes_copied;
     pthread_mutex_unlock(&stats.mx);
 
-    logf(1, "\nDone. Moved: %lu, Skipped: %lu, Failed: %lu, Bytes copied: %llu", moved, skipped, failed, bytes);
+    log_msg(1, "\nDone. Moved: %lu, Skipped: %lu, Failed: %lu, Bytes copied: %llu", moved, skipped, failed, bytes);
 
     free_strv(opt.includes, opt.n_includes);
     free_strv(opt.excludes, opt.n_excludes);
