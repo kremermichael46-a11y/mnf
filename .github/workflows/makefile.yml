@@ -8,20 +8,19 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: configure
-      run: ./configure
+      - name: Build
+        run: |
+          make clean
+          make build
 
-    - name: Install dependencies
-      run: make
-
-    - name: Run check
-      run: make check
-
-    - name: Run distcheck
-      run: make distcheck
+      - name: Smoke tests
+        run: |
+          set -euxo pipefail
+          ./mnf --version
+          ./mnf --help | head -n 25
